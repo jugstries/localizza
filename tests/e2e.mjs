@@ -99,7 +99,9 @@ near(r.sun.az, 222, 6, 'azimut del sole'); near(r.sun.el, 20, 6, 'altezza del so
 // Interfaccia: punta l'Etna, tocca il centro, deve comparire il paese simulato.
 await page.goto(`${base}/?demo=${obs.lat},${obs.lon},${r.sight.az},${r.sight.el - 0.2}`);
 await page.mouse.click(195, 422);
-await page.waitForSelector('#sheet:not([hidden]) h2');
+await page.waitForSelector('#sheet .tech');
+await page.waitForFunction(() => document.querySelector('#sheet h2').textContent === 'Paese di Prova');
+assert.equal(await page.textContent('#btn-freeze'), '▶', 'immagine bloccata dopo il tocco');
 const title = await page.textContent('#sheet h2');
 const facts = await page.textContent('#sheet .facts');
 console.log(title, '|', facts);
@@ -110,8 +112,16 @@ await page.screenshot({ path: join(cache, 'risultato.png') });
 assert.match(await page.textContent('#sheet .tech'), /Direzione 23\d/);
 await page.click('#sheet-close');
 await page.mouse.click(195, 100); // molto sopra il crinale
-await page.waitForSelector('#sheet:not([hidden]) h2');
-assert.equal(await page.textContent('#sheet h2'), 'Cielo');
+await page.waitForFunction(() => document.querySelector('#sheet h2')?.textContent === 'Cielo');
+
+// Servizio dei nomi irraggiungibile: il punto trovato deve comparire lo stesso.
+await page.unroute('**/api/interpreter');
+await page.route('**/api/interpreter', (route) => route.abort());
+await page.click('#sheet-close');
+await page.mouse.click(195, 422);
+await page.waitForFunction(() => /Non sono riuscito a scaricare i nomi/.test(document.querySelector('#sheet')?.textContent));
+assert.equal(await page.textContent('#sheet h2'), 'Comune Finto, Provincia Finta, Italia');
+await page.screenshot({ path: join(cache, 'senza-nomi.png') });
 
 await browser.close();
 server.close();

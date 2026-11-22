@@ -30,21 +30,26 @@ function classify(tags) {
 
 /** Luoghi con nome entro `radius` metri da (lat, lon). */
 export async function findPlaces(lat, lon, radius) {
-  const a = `(around:${Math.round(radius)},${lat.toFixed(5)},${lon.toFixed(5)})`;
-  const query = `[out:json][timeout:20];(
+  const around = (r) => `(around:${Math.round(r)},${lat.toFixed(5)},${lon.toFixed(5)})`;
+  const a = around(radius);
+  // Castelli e fari sono spesso edifici (non punti): cercarli costa di più,
+  // quindi su un raggio ridotto.
+  const b = around(Math.min(radius, 6000));
+  const query = `[out:json][timeout:8];(
     node${a}[place~"^(city|town|village|hamlet|suburb|locality|isolated_dwelling)$"][name];
     node${a}[natural~"^(peak|volcano|cape)$"][name];
-    nwr${a}[historic~"^(castle|fort|monastery)$"][name];
-    nwr${a}[man_made=lighthouse][name];
+    nwr${b}[historic~"^(castle|fort|monastery)$"][name];
+    nwr${b}[man_made=lighthouse][name];
   );out center tags 120;`;
 
+  // I server pubblici a volte sono sovraccarichi: attesa breve, poi si prova l'altro.
   let lastError;
   for (const url of OVERPASS) {
     try {
       const res = await fetch(url, {
         method: 'POST',
         body: new URLSearchParams({ data: query }),
-        signal: AbortSignal.timeout(25000),
+        signal: AbortSignal.timeout(10000),
       });
       if (!res.ok) throw new Error(`Overpass ${res.status}`);
       const json = await res.json();
@@ -72,7 +77,7 @@ export async function reverseGeocode(lat, lon) {
   try {
     const url = 'https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=13&addressdetails=1'
       + `&accept-language=it&lat=${lat.toFixed(5)}&lon=${lon.toFixed(5)}`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+    const res = await fetch(url, { signal: AbortSignal.timeout(7000) });
     if (!res.ok) return null;
     const a = (await res.json()).address;
     if (!a) return null;

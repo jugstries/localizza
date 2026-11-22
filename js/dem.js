@@ -54,7 +54,7 @@ export class Dem {
 
   async fetchTile(key) {
     const [z, x, y] = key.split('/').map(Number);
-    const res = await fetch(TILE_URL(z, x, y));
+    const res = await fetch(TILE_URL(z, x, y), { signal: AbortSignal.timeout(20000) });
     if (!res.ok) throw new Error(`Quote del terreno non disponibili (${res.status})`);
     // Niente conversioni di colore: i byte dei pixel sono dati, non un'immagine.
     const bmp = await createImageBitmap(await res.blob(), {

@@ -28,7 +28,8 @@ let position = null;
 let zoom = 1;
 let zoomBase = 1;
 let camera = null;
-let busy = false;
+let job = 0; // identifica la ricerca in corso: le risposte di quelle vecchie si ignorano
+let frozen = null; // { matrix } quando l'immagine è bloccata
 let map = null;
 let mapLayer = null;
 let startedAt = 0;
@@ -52,10 +53,11 @@ function tapTangents(x, y) {
 }
 
 function directionAt(x, y) {
-  if (!orientation.matrix) return null;
+  const matrix = frozen ? frozen.matrix : orientation.matrix;
+  if (!matrix) return null;
   const { tanX, tanY } = tapTangents(x, y);
   const angle = (screen.orientation && screen.orientation.angle) || 0;
-  const ray = rayFromMatrix(orientation.matrix, tanX, tanY, angle);
+  const ray = rayFromMatrix(matrix, tanX, tanY, angle);
   return { az: wrap360(ray.az + settings.head), el: ray.el + settings.pitch };
 }
 
@@ -69,7 +71,7 @@ const fmtDist = (m) => (m < 1000 ? `${Math.round(m / 10) * 10} m` : `${(m / 1000
  * `profile` e `index` servono a ripetere la ricerca su un altro tratto visibile
  * della stessa direzione, senza rilanciare il raggio.
  */
-async function identify(dir, profile = null, index = null) {
+async function identify(dir, profile = null, index = null, onUpdate = () => {}) {
   const obs = profile ? profile.obs : position;
   if (!profile) {
     profile = await castProfile(dem, obs, dir.az, settings.dist * 1000);
@@ -85,28 +87,33 @@ async function identify(dir, profile = null, index = null) {
     note = `La direzione toccata passa ${Math.abs(pick.miss).toFixed(1)}° ${pick.miss > 0 ? 'sopra' : 'sotto'} il terreno visibile più vicino: ti mostro quello.`;
   }
 
+  // Il punto sul terreno è già noto: lo si mostra subito, i nomi arrivano dopo.
+  const result = { ...base, kind: 'land', hit: target, note, candidates: [], area: null, pending: true };
+  onUpdate({ ...result });
+
+  const areaDone = reverseGeocode(target.lat, target.lon).then((area) => {
+    result.area = area;
+    if (result.pending) onUpdate({ ...result });
+  });
+
   // Raggio di ricerca: copre circa 8° di errore della bussola a quella distanza.
   const radius = Math.min(20000, Math.max(1500, target.dist * Math.tan(8 * D2R)));
-  const [placesRes, areaRes] = await Promise.allSettled([
-    findPlaces(target.lat, target.lon, radius),
-    reverseGeocode(target.lat, target.lon),
-  ]);
-
-  let candidates = [];
-  if (placesRes.status === 'fulfilled') {
-    candidates = await Promise.all(placesRes.value.map(async (p) => {
+  try {
+    const places = await findPlaces(target.lat, target.lon, radius);
+    const candidates = await Promise.all(places.map(async (p) => {
       const s = await sightTo(dem, obs, profile.h0, p.lat, p.lon);
       const sep = angularSeparation(dir.az, target.el, s.az, s.el);
       return { ...p, ...s, sep, score: sep + (s.visible ? 0 : 2.5) - p.weight };
     }));
     candidates.sort((a, b) => a.score - b.score);
+    result.candidates = candidates.slice(0, 6);
+  } catch (err) {
+    console.error(err);
+    result.placesFailed = true;
   }
-  return {
-    ...base, kind: 'land', hit: target, note,
-    candidates: candidates.slice(0, 6),
-    area: areaRes.status === 'fulfilled' ? areaRes.value : null,
-    placesFailed: placesRes.status === 'rejected',
-  };
+  result.pending = false;
+  await areaDone;
+  return result;
 }
 
 /** Righe di diagnostica mostrate in fondo alla scheda. */
@@ -145,10 +152,67 @@ function showSheet(...nodes) {
 }
 
 function closeSheet() {
+  job++; // un'eventuale ricerca in corso non deve riaprire la scheda
   $('sheet').hidden = true;
   $('marker').hidden = true;
+  $('marker').classList.remove('busy');
   $('hint').hidden = false;
-  $('zoom-bar').hidden = !(camera && camera.zoom);
+  syncFreeze();
+}
+
+// ---------- Blocco dell'immagine ----------
+// Al tocco l'immagine e la direzione vengono fissate: si può abbassare il
+// telefono mentre arrivano i risultati, e toccare con calma altri punti.
+
+function freeze() {
+  if (frozen) return;
+  frozen = { matrix: orientation.matrix && [...orientation.matrix] };
+  video.pause();
+  syncFreeze();
+}
+
+function unfreeze() {
+  if (!frozen) return;
+  frozen = null;
+  if (video.srcObject) video.play().catch(() => {});
+  syncFreeze();
+}
+
+function syncFreeze() {
+  const btn = $('btn-freeze');
+  btn.textContent = frozen ? '▶' : '⏸';
+  btn.title = frozen ? 'Riprendi la fotocamera' : 'Blocca l\'immagine';
+  btn.setAttribute('aria-label', btn.title);
+  $('hint').textContent = frozen
+    ? 'Immagine bloccata: tocca un punto, oppure ▶ per riprendere'
+    : 'Tocca il punto che vuoi riconoscere (⏸ per bloccare l\'immagine)';
+  $('zoom-bar').hidden = !!frozen || !(camera && camera.zoom) || !$('sheet').hidden;
+}
+
+function showProgress() {
+  $('map').hidden = true;
+  showSheet(
+    el('p', { className: 'eyebrow', textContent: 'Direzione registrata' }),
+    el('h2', { textContent: 'Sto cercando…' }),
+    el('p', { className: 'facts', textContent: 'Puoi abbassare il telefono: immagine e direzione sono state fissate nel momento del tocco.' }),
+    el('p', { className: 'small', textContent: 'Scarico il rilievo del terreno in quella direzione…' }),
+  );
+}
+
+/** Esegue una ricerca mostrando i risultati man mano che arrivano. */
+async function run(dir, profile = null, index = null) {
+  const id = ++job;
+  $('marker').classList.add('busy');
+  if (!profile) showProgress();
+  try {
+    const final = await identify(dir, profile, index, (partial) => { if (id === job) render(partial); });
+    if (id === job) render(final);
+  } catch (err) {
+    console.error(err);
+    if (id === job) showError(`Non sono riuscito a scaricare il rilievo del terreno: controlla la connessione e riprova. (${err.message})`);
+  } finally {
+    if (id === job) $('marker').classList.remove('busy');
+  }
 }
 
 function render(result) {
@@ -181,8 +245,8 @@ function render(result) {
   const { hit, candidates, area } = result;
   const best = candidates[0];
   const nodes = [
-    el('p', { className: 'eyebrow', textContent: best ? `${best.label} · più probabile` : 'Punto del terreno' }),
-    el('h2', { textContent: best ? best.name : (area || 'Luogo senza nome') }),
+    el('p', { className: 'eyebrow', textContent: best ? `${best.label} · più probabile` : (result.pending ? 'Punto trovato · cerco i nomi…' : 'Punto del terreno') }),
+    el('h2', { textContent: best ? best.name : (area || (result.pending ? `Terreno a ${fmtDist(hit.dist)}` : 'Luogo senza nome')) }),
     el('p', {
       className: 'facts',
       textContent: [
@@ -193,7 +257,8 @@ function render(result) {
       ].filter(Boolean).join(' · '),
     }),
   ];
-  if (area) nodes.push(el('p', { className: 'small', textContent: `Zona del punto toccato: ${area}` }));
+  if (area && best) nodes.push(el('p', { className: 'small', textContent: `Zona del punto toccato: ${area}` }));
+  if (result.pending) nodes.push(el('p', { className: 'small', textContent: 'Sto cercando paesi e cime attorno a questo punto: può volerci qualche secondo.' }));
   if (!orientation.absolute) {
     nodes.push(el('p', { className: 'note', textContent: 'Attenzione: questo browser non fornisce una bussola riferita al nord, quindi la direzione può essere del tutto sbagliata. Usa ☀ per calibrarla con il sole.' }));
   }
@@ -251,20 +316,7 @@ function techBlock(result) {
 }
 
 /** Ripete la ricerca su un altro tratto visibile della stessa direzione. */
-async function step(result, index) {
-  if (busy) return;
-  busy = true;
-  $('marker').classList.add('busy');
-  try {
-    render(await identify(result.dir, result.profile, index));
-  } catch (err) {
-    console.error(err);
-    showError(`Non sono riuscito a completare la ricerca. (${err.message})`);
-  } finally {
-    busy = false;
-    $('marker').classList.remove('busy');
-  }
-}
+const step = (result, index) => run(result.dir, result.profile, index);
 
 function drawMap({ obs, hit, candidates }) {
   if (!window.L) return;
@@ -319,33 +371,27 @@ function showCompassHelp() {
 
 // ---------- Tocco ----------
 
-view.addEventListener('pointerup', async (e) => {
-  if (e.target.closest('#hud, #zoom-bar') || busy || !$('sun').hidden) return;
+view.addEventListener('pointerup', (e) => {
+  if (e.target.closest('#hud, #zoom-bar') || !$('sun').hidden) return;
   if (!$('sheet').hidden) { closeSheet(); return; }
+
+  // La direzione si legge nell'istante del tocco, poi si blocca tutto.
+  const dir = directionAt(e.clientX, e.clientY);
+  freeze();
 
   const marker = $('marker');
   marker.style.left = `${e.clientX}px`;
   marker.style.top = `${e.clientY}px`;
   marker.hidden = false;
 
-  // La direzione va letta subito: mentre si aspetta la rete il telefono si muove.
-  const dir = directionAt(e.clientX, e.clientY);
   if (!position) return showError('Sto ancora aspettando la posizione GPS. Mettiti all\'aperto e riprova fra qualche secondo.');
   if (!dir) return showCompassHelp();
-
-  busy = true;
-  marker.classList.add('busy');
-  try {
-    render(await identify(dir));
-  } catch (err) {
-    console.error(err);
-    showError(`Serve una connessione a internet per scaricare il rilievo del terreno. (${err.message})`);
-  } finally {
-    busy = false;
-    marker.classList.remove('busy');
-  }
+  run(dir);
 });
 
+$('btn-freeze').addEventListener('click', () => {
+  if (frozen) { closeSheet(); unfreeze(); } else freeze();
+});
 $('sheet-close').addEventListener('click', closeSheet);
 $('hud-dir').addEventListener('click', () => { if (!orientation.matrix) showCompassHelp(); });
 
@@ -431,7 +477,7 @@ $('settings-reset').addEventListener('click', () => {
 
 // ---------- Calibrazione con il sole ----------
 
-$('btn-sun').addEventListener('click', () => { closeSheet(); $('sun').hidden = false; });
+$('btn-sun').addEventListener('click', () => { closeSheet(); unfreeze(); $('sun').hidden = false; });
 $('sun-cancel').addEventListener('click', () => { $('sun').hidden = true; });
 $('sun-ok').addEventListener('click', () => {
   const dir = centerDirection();
@@ -476,9 +522,10 @@ if (demo) {
   orientation.setManual(az, elv || 0);
   onFix({ lat, lon, accuracy: 5 });
   $('start').hidden = true;
-  $('hint').textContent = 'Demo: tocca un punto (il centro è la direzione impostata)';
   requestAnimationFrame(updateHud);
 }
+
+syncFreeze();
 
 // Per i test automatici.
 window.localizza = { dem, orientation, settings, identify };
