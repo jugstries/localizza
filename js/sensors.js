@@ -10,19 +10,25 @@ export class Orientation {
     this.onEvent = this.onEvent.bind(this);
   }
 
+  /**
+   * Avvia l'ascolto dei sensori. Va chiamato dentro un tocco dell'utente.
+   * Non fallisce se il permesso è negato: l'app parte lo stesso e lo segnala,
+   * così si può riprovare dopo averlo abilitato.
+   */
   async start() {
     const DOE = window.DeviceOrientationEvent;
-    if (!DOE) throw new Error('Questo dispositivo non ha sensori di orientamento');
-    // iOS chiede un permesso esplicito, e solo in risposta a un tocco.
-    if (typeof DOE.requestPermission === 'function') {
-      if ((await DOE.requestPermission()) !== 'granted') {
-        throw new Error('Permesso ai sensori di movimento negato');
+    if (!DOE) return;
+    // Alcuni browser (Safari, e altri a seguire) chiedono un permesso esplicito.
+    for (const api of [DOE, window.DeviceMotionEvent]) {
+      if (api && typeof api.requestPermission === 'function') {
+        try { await api.requestPermission(); } catch { /* si prova comunque ad ascoltare */ }
       }
     }
-    const type = 'ondeviceorientationabsolute' in window
-      ? 'deviceorientationabsolute'
-      : 'deviceorientation';
-    window.addEventListener(type, this.onEvent);
+    // Si ascoltano entrambi gli eventi: quale arrivi dipende dal browser.
+    window.removeEventListener('deviceorientationabsolute', this.onEvent);
+    window.removeEventListener('deviceorientation', this.onEvent);
+    window.addEventListener('deviceorientationabsolute', this.onEvent);
+    window.addEventListener('deviceorientation', this.onEvent);
   }
 
   onEvent(e) {
@@ -31,9 +37,11 @@ export class Orientation {
     if (typeof e.webkitCompassHeading === 'number') {
       // Safari: alpha è relativo, la bussola arriva a parte.
       alpha = 360 - e.webkitCompassHeading;
-      this.absolute = true;
+    } else if (e.type === 'deviceorientation' && e.absolute !== true) {
+      // Evento non riferito al nord: inutile se è disponibile quello assoluto.
+      if (this.absolute) return;
     } else {
-      this.absolute = e.absolute === true;
+      this.absolute = true;
     }
     if (alpha == null) return;
     this.push(rotationMatrix(alpha, e.beta, e.gamma));

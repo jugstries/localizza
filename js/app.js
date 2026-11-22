@@ -31,6 +31,7 @@ let camera = null;
 let busy = false;
 let map = null;
 let mapLayer = null;
+let startedAt = 0;
 
 const video = $('video');
 const view = $('view');
@@ -237,6 +238,22 @@ function showError(message) {
   );
 }
 
+function showCompassHelp() {
+  $('map').hidden = true;
+  const retry = el('button', { className: 'primary', textContent: 'Riprova' });
+  retry.addEventListener('click', async () => {
+    await orientation.start();
+    closeSheet();
+  });
+  showSheet(
+    el('p', { className: 'eyebrow', textContent: 'Bussola non disponibile' }),
+    el('h2', { textContent: 'Sensori di movimento bloccati' }),
+    el('p', { className: 'facts', textContent: 'Il browser non sta passando alla pagina bussola e inclinazione, e senza non posso sapere dove punta la fotocamera.' }),
+    el('p', { className: 'small', textContent: 'In Chrome: tocca l\'icona a sinistra dell\'indirizzo → Autorizzazioni (o Impostazioni sito) → Sensori di movimento → Consenti. Se non c\'è la voce: menu ⋮ → Impostazioni → Impostazioni sito → Sensori di movimento. Se hai aperto il link da dentro un\'altra app, aprilo direttamente in Chrome. Poi premi Riprova o ricarica la pagina.' }),
+    retry,
+  );
+}
+
 // ---------- Tocco ----------
 
 view.addEventListener('pointerup', async (e) => {
@@ -251,7 +268,7 @@ view.addEventListener('pointerup', async (e) => {
   // La direzione va letta subito: mentre si aspetta la rete il telefono si muove.
   const dir = directionAt(e.clientX, e.clientY);
   if (!position) return showError('Sto ancora aspettando la posizione GPS. Mettiti all\'aperto e riprova fra qualche secondo.');
-  if (!dir) return showError('La bussola del telefono non sta inviando dati.');
+  if (!dir) return showCompassHelp();
 
   busy = true;
   marker.classList.add('busy');
@@ -267,13 +284,20 @@ view.addEventListener('pointerup', async (e) => {
 });
 
 $('sheet-close').addEventListener('click', closeSheet);
+$('hud-dir').addEventListener('click', () => { if (!orientation.matrix) showCompassHelp(); });
 
 // ---------- Barra in alto ----------
 
 function updateHud() {
   const dir = centerDirection();
+  const pill = $('hud-dir');
+  if (!dir && performance.now() - startedAt > 3000) {
+    pill.textContent = 'Bussola assente · tocca';
+    pill.className = 'pill bad';
+  }
   if (dir) {
-    $('hud-dir').textContent = `${compassPoint(dir.az)} ${Math.round(dir.az)}° · ${dir.el >= 0 ? '+' : ''}${dir.el.toFixed(1)}°`;
+    pill.className = 'pill';
+    pill.textContent = `${compassPoint(dir.az)} ${Math.round(dir.az)}° · ${dir.el >= 0 ? '+' : ''}${dir.el.toFixed(1)}°`;
     if (!$('sun').hidden && position) {
       const sun = sunPosition(new Date(), position.lat, position.lon);
       $('sun-info').textContent = sun.el < 2
@@ -370,6 +394,7 @@ async function start() {
     setupZoom();
     watchPosition(onFix, onFixError);
     $('start').hidden = true;
+    startedAt = performance.now();
     requestAnimationFrame(updateHud);
   } catch (err) {
     console.error(err);
