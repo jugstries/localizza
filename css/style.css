@@ -211,3 +211,9 @@ button.icon {
 .sheet a { color: var(--accent); }
 .sheet .links { display: flex; flex-wrap: wrap; gap: 14px; margin: 8px 0 12px; font-size: 14px; }
 #map { height: 240px; border-radius: 12px; overflow: hidden; background: #223; }
+.row.step { justify-content: stretch; margin: 6px 0 12px; }
+.row.step button { flex: 1; }
+button:disabled { opacity: .4; }
+.tech { margin: 12px 0; font-size: 12px; color: var(--muted); }
+.tech summary { padding: 8px 0; cursor: pointer; }
+.tech p { margin: 2px 0; overflow-wrap: anywhere; }

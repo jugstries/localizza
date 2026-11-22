@@ -105,48 +105,86 @@ export async function observerHeight(dem, lat, lon) {
 }
 
 /**
- * Lancia un raggio dall'osservatore e trova il primo punto del terreno colpito.
+ * Profilo di ciò che si vede guardando lungo l'azimut `az`.
  * `dem` deve offrire `ensure(punti)` (asincrono) e `get(lat, lon, z)` (sincrono).
  *
- * Ritorna { type: 'terrain' | 'sea' | 'sky', lat, lon, dist, elev, h0, horizon }
- * dove `horizon` è il punto del profilo visto con l'angolo più alto (il crinale).
+ * Ritorna { h0, visible, segments }:
+ *  - `visible`: i campioni non coperti da terreno più vicino, in ordine di
+ *    distanza (e quindi di angolo crescente), mare compreso;
+ *  - `segments`: gli stessi campioni di terraferma raggruppati in tratti
+ *    continui (es. la riva vicina, la costa di fronte, il crinale dietro).
  */
-export async function castRay(dem, obs, az, el, maxDist = 150000) {
+export async function castProfile(dem, obs, az, maxDist = 150000) {
   const h0 = await observerHeight(dem, obs.lat, obs.lon);
   const dists = sampleDistances(maxDist);
   const pts = dists.map((d) => ({ ...destination(obs.lat, obs.lon, az, d), d, z: zoomFor(d) }));
   await dem.ensure(pts);
 
-  const at = (d) => {
-    const p = destination(obs.lat, obs.lon, az, d);
-    const raw = dem.get(p.lat, p.lon, zoomFor(d));
-    return { ...p, d, raw, ang: elevationAngle(h0, Math.max(raw, 0), d) };
-  };
-
-  let horizon = null;
-  let prev = null;
-  for (const d of dists) {
-    let s = at(d);
-    if (!horizon || s.ang > horizon.ang) horizon = s;
-    if (s.ang >= el) {
-      // Affina per bisezione fra l'ultimo campione "in aria" e questo.
-      let lo = prev ? prev.d : 0, hi = d;
-      for (let i = 0; i < 10; i++) {
-        const mid = at((lo + hi) / 2);
-        if (mid.ang >= el) { hi = mid.d; s = mid; } else lo = mid.d;
-      }
-      return {
-        type: s.raw <= 0 ? 'sea' : 'terrain',
-        lat: s.lat, lon: s.lon, dist: s.d, elev: Math.max(s.raw, 0), h0,
-        horizon: pack(horizon),
-      };
+  const visible = [];
+  const segments = [];
+  let current = null;
+  let maxAng = -Infinity;
+  for (const p of pts) {
+    const raw = dem.get(p.lat, p.lon, p.z);
+    const elev = Math.max(raw, 0);
+    // Il rilievo ha pixel di ~60 m e include edifici: vicino all'osservatore
+    // piccoli dossi fasulli non devono coprire il panorama. Si alza quindi
+    // l'occhio di qualche metro (effetto trascurabile sui punti lontani).
+    const el = elevationAngle(h0 + Math.min(8, p.d * 0.03), elev, p.d);
+    if (el <= maxAng) { current = null; continue; }
+    maxAng = el;
+    const s = { lat: p.lat, lon: p.lon, dist: p.d, elev, el, land: raw > 0 };
+    visible.push(s);
+    if (!s.land) { current = null; continue; }
+    if (!current) {
+      const last = segments[segments.length - 1];
+      const gap = last ? p.d - last[last.length - 1].dist : Infinity;
+      if (gap < Math.max(500, p.d * 0.05)) current = last;
+      else segments.push(current = []);
     }
-    prev = s;
+    current.push(s);
   }
-  return { type: 'sky', h0, horizon: pack(horizon), gap: el - horizon.ang };
+  return { h0, az, visible, segments };
 }
 
-const pack = (s) => ({ lat: s.lat, lon: s.lon, dist: s.d, elev: Math.max(s.raw, 0), el: s.ang });
+/**
+ * Sceglie cosa si sta indicando con l'elevazione `el` lungo un profilo.
+ * L'inclinometro del telefono sbaglia di 1-2°, quindi non si prende alla
+ * lettera il primo punto colpito: si cerca il tratto di terraferma visibile
+ * più vicino in angolo, sfavorendo ciò che sta a pochi passi (chi inquadra
+ * l'orizzonte non sta chiedendo del terreno sotto i piedi).
+ *
+ * Con `index` si forza un tratto preciso (comandi "più vicino / più lontano").
+ * Ritorna { kind: 'land', index, point, miss } oppure { kind: 'sea' | 'sky', nearest }.
+ */
+export function pickTarget(profile, el, index = null) {
+  const { segments, visible } = profile;
+  const closest = (seg) => seg.reduce((a, b) => (Math.abs(b.el - el) < Math.abs(a.el - el) ? b : a));
+  const missOf = (seg) => {
+    if (el < seg[0].el) return el - seg[0].el;
+    const top = seg[seg.length - 1].el;
+    return el > top ? el - top : 0;
+  };
+
+  let best = index;
+  if (best == null) {
+    let bestScore = Infinity;
+    segments.forEach((seg, i) => {
+      const near = closest(seg).dist < 1000 && el > -4;
+      const score = Math.abs(missOf(seg)) + (near ? 1.5 : 0);
+      if (score < bestScore) { bestScore = score; best = i; }
+    });
+  }
+  if (best == null) {
+    return { kind: visible.some((s) => s.el >= el) ? 'sea' : 'sky', nearest: null };
+  }
+  const miss = missOf(segments[best]);
+  if (index == null && Math.abs(miss) > 1.5) {
+    const water = visible.find((s) => s.el >= el);
+    return { kind: water ? 'sea' : 'sky', nearest: best, dist: water && water.dist };
+  }
+  return { kind: 'land', index: best, point: closest(segments[best]), miss };
+}
 
 /**
  * Direzione e visibilità di un punto noto (es. un paese) dall'osservatore.

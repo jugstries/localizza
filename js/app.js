@@ -1,5 +1,5 @@
 import {
-  rayFromMatrix, castRay, sightTo, angularSeparation, sunPosition,
+  rayFromMatrix, castProfile, pickTarget, sightTo, angularSeparation, sunPosition,
   compassPoint, wrap180, wrap360,
 } from './geo.js';
 import { Dem } from './dem.js';
@@ -65,20 +65,25 @@ const centerDirection = () => directionAt(view.clientWidth / 2, view.clientHeigh
 
 const fmtDist = (m) => (m < 1000 ? `${Math.round(m / 10) * 10} m` : `${(m / 1000).toFixed(m < 20000 ? 1 : 0)} km`);
 
-async function identify(dir) {
-  const obs = position;
-  const hit = await castRay(dem, obs, dir.az, dir.el, settings.dist * 1000);
-
-  let target = hit;
-  let note = null;
-  if (hit.type === 'sky') {
-    // Un piccolo errore d'inclinazione basta a "mancare" un crinale: se il
-    // raggio passa appena sopra, si usa il crinale in quella direzione.
-    if (hit.gap > 4 || hit.horizon.elev <= 0) return { kind: 'sky', dir, hit };
-    target = { ...hit.horizon, type: 'terrain' };
-    note = `Il punto toccato risulta ${hit.gap.toFixed(1)}° sopra il profilo del terreno: ti mostro il crinale in quella direzione.`;
+/**
+ * `profile` e `index` servono a ripetere la ricerca su un altro tratto visibile
+ * della stessa direzione, senza rilanciare il raggio.
+ */
+async function identify(dir, profile = null, index = null) {
+  const obs = profile ? profile.obs : position;
+  if (!profile) {
+    profile = await castProfile(dem, obs, dir.az, settings.dist * 1000);
+    profile.obs = obs;
   }
-  if (target.type === 'sea') return { kind: 'sea', dir, hit: target };
+  const pick = pickTarget(profile, dir.el, index);
+  const base = { dir, obs, profile, pick, tech: techInfo(dir, profile) };
+  if (pick.kind !== 'land') return { ...base, kind: pick.kind };
+
+  const target = pick.point;
+  let note = null;
+  if (index == null && Math.abs(pick.miss) > 0.3) {
+    note = `La direzione toccata passa ${Math.abs(pick.miss).toFixed(1)}° ${pick.miss > 0 ? 'sopra' : 'sotto'} il terreno visibile più vicino: ti mostro quello.`;
+  }
 
   // Raggio di ricerca: copre circa 8° di errore della bussola a quella distanza.
   const radius = Math.min(20000, Math.max(1500, target.dist * Math.tan(8 * D2R)));
@@ -89,20 +94,34 @@ async function identify(dir) {
 
   let candidates = [];
   if (placesRes.status === 'fulfilled') {
-    const refEl = hit.type === 'sky' ? target.el : dir.el;
     candidates = await Promise.all(placesRes.value.map(async (p) => {
-      const s = await sightTo(dem, obs, hit.h0, p.lat, p.lon);
-      const sep = angularSeparation(dir.az, refEl, s.az, s.el);
+      const s = await sightTo(dem, obs, profile.h0, p.lat, p.lon);
+      const sep = angularSeparation(dir.az, target.el, s.az, s.el);
       return { ...p, ...s, sep, score: sep + (s.visible ? 0 : 2.5) - p.weight };
     }));
     candidates.sort((a, b) => a.score - b.score);
   }
   return {
-    kind: 'land', dir, hit: target, note, obs,
+    ...base, kind: 'land', hit: target, note,
     candidates: candidates.slice(0, 6),
     area: areaRes.status === 'fulfilled' ? areaRes.value : null,
     placesFailed: placesRes.status === 'rejected',
   };
+}
+
+/** Righe di diagnostica mostrate in fondo alla scheda. */
+function techInfo(dir, profile) {
+  const stretches = profile.segments.map((seg) => {
+    const a = seg[0], b = seg[seg.length - 1];
+    return `${fmtDist(a.dist)}–${fmtDist(b.dist)} (${a.el.toFixed(1)}°…${b.el.toFixed(1)}°)`;
+  });
+  return [
+    `Direzione ${dir.az.toFixed(1)}°, inclinazione ${dir.el >= 0 ? '+' : ''}${dir.el.toFixed(2)}°`,
+    `Bussola: ${orientation.absolute ? 'riferita al nord' : 'NON riferita al nord'}`,
+    `Zoom ${(zoom / zoomBase).toFixed(1)}×, campo visivo ${settings.fov}°, correzioni ${settings.head}° / ${settings.pitch}°`,
+    `Posizione ${profile.obs.lat.toFixed(5)}, ${profile.obs.lon.toFixed(5)} (±${Math.round(profile.obs.accuracy || 0)} m), occhi a ${Math.round(profile.h0)} m s.l.m.`,
+    `Terreno visibile in questa direzione: ${stretches.join('; ') || 'nessuno'}`,
+  ];
 }
 
 // ---------- Scheda dei risultati ----------
@@ -137,20 +156,25 @@ function render(result) {
   const dirText = `direzione ${compassPoint(dir.az)} ${Math.round(dir.az)}°`;
   $('map').hidden = result.kind !== 'land';
 
-  if (result.kind === 'sky') {
-    showSheet(
-      el('p', { className: 'eyebrow', textContent: 'Nessun terreno' }),
-      el('h2', { textContent: 'Cielo' }),
-      el('p', { className: 'facts', textContent: `In ${dirText} non c'è terreno visibile entro ${settings.dist} km. Tocca più in basso, sul profilo del paesaggio.` }),
-    );
-    return;
-  }
-  if (result.kind === 'sea') {
-    showSheet(
-      el('p', { className: 'eyebrow', textContent: 'Acqua' }),
-      el('h2', { textContent: 'Mare' }),
-      el('p', { className: 'facts', textContent: `Superficie dell'acqua a circa ${fmtDist(result.hit.dist)}, ${dirText}. Per una costa lontana tocca un po' più in alto.` }),
-    );
+  if (result.kind !== 'land') {
+    const sky = result.kind === 'sky';
+    const nodes = [
+      el('p', { className: 'eyebrow', textContent: sky ? 'Nessun terreno' : 'Acqua' }),
+      el('h2', { textContent: sky ? 'Cielo' : 'Mare' }),
+      el('p', {
+        className: 'facts',
+        textContent: sky
+          ? `In ${dirText} il punto toccato è sopra tutto il terreno visibile entro ${settings.dist} km.`
+          : `In ${dirText} il punto toccato cade sull'acqua${result.pick.dist ? `, a circa ${fmtDist(result.pick.dist)}` : ''}.`,
+      }),
+    ];
+    if (result.pick.nearest != null) {
+      const go = el('button', { textContent: 'Mostra il terreno più vicino a questa direzione' });
+      go.addEventListener('click', () => step(result, result.pick.nearest));
+      nodes.push(go);
+    }
+    nodes.push(techBlock(result));
+    showSheet(...nodes);
     return;
   }
 
@@ -170,6 +194,9 @@ function render(result) {
     }),
   ];
   if (area) nodes.push(el('p', { className: 'small', textContent: `Zona del punto toccato: ${area}` }));
+  if (!orientation.absolute) {
+    nodes.push(el('p', { className: 'note', textContent: 'Attenzione: questo browser non fornisce una bussola riferita al nord, quindi la direzione può essere del tutto sbagliata. Usa ☀ per calibrarla con il sole.' }));
+  }
   if (result.note) nodes.push(el('p', { className: 'note', textContent: result.note }));
   if (result.placesFailed) {
     nodes.push(el('p', { className: 'note', textContent: 'Non sono riuscito a scaricare i nomi dei luoghi (rete lenta o servizio occupato). Il punto sulla mappa è comunque quello calcolato.' }));
@@ -199,8 +226,44 @@ function render(result) {
     }
     nodes.push(list);
   }
+  const total = result.profile.segments.length;
+  if (total > 1) {
+    const i = result.pick.index;
+    const nearer = el('button', { textContent: '◂ Più vicino', disabled: i === 0 });
+    const farther = el('button', { textContent: 'Più lontano ▸', disabled: i === total - 1 });
+    nearer.addEventListener('click', () => step(result, i - 1));
+    farther.addEventListener('click', () => step(result, i + 1));
+    nodes.push(
+      el('h3', { textContent: `Non è questo? In questa direzione si vedono ${total} tratti di terreno (questo è il ${i + 1}°)` }),
+      el('div', { className: 'row step' }, nearer, farther),
+    );
+  }
+  nodes.push(techBlock(result));
   showSheet(...nodes);
   drawMap(result);
+}
+
+function techBlock(result) {
+  return el('details', { className: 'tech' },
+    el('summary', { textContent: 'Dati tecnici' }),
+    ...result.tech.map((line) => el('p', { textContent: line })),
+  );
+}
+
+/** Ripete la ricerca su un altro tratto visibile della stessa direzione. */
+async function step(result, index) {
+  if (busy) return;
+  busy = true;
+  $('marker').classList.add('busy');
+  try {
+    render(await identify(result.dir, result.profile, index));
+  } catch (err) {
+    console.error(err);
+    showError(`Non sono riuscito a completare la ricerca. (${err.message})`);
+  } finally {
+    busy = false;
+    $('marker').classList.remove('busy');
+  }
 }
 
 function drawMap({ obs, hit, candidates }) {

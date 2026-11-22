@@ -37,6 +37,7 @@ export class Orientation {
     if (typeof e.webkitCompassHeading === 'number') {
       // Safari: alpha è relativo, la bussola arriva a parte.
       alpha = 360 - e.webkitCompassHeading;
+      this.absolute = true;
     } else if (e.type === 'deviceorientation' && e.absolute !== true) {
       // Evento non riferito al nord: inutile se è disponibile quello assoluto.
       if (this.absolute) return;

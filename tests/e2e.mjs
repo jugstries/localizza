@@ -60,13 +60,19 @@ const r = await page.evaluate(async ({ obs, etna }) => {
   const { dem } = window.localizza;
   const h0 = await geo.observerHeight(dem, obs.lat, obs.lon);
   const sight = await geo.sightTo(dem, obs, h0, etna.lat, etna.lon);
-  const hit = await geo.castRay(dem, obs, sight.az, sight.el - 0.2, 150000);
+  const profile = await geo.castProfile(dem, obs, sight.az, 150000);
+  const hit = geo.pickTarget(profile, sight.el - 0.2).point;
   const m = geo.rotationMatrix(360 - 120, 90 + 10, 0);
+  // Verso ovest c'è lo Stretto e poi la Sicilia: riva vicina, mare, costa di fronte.
+  const west = await geo.castProfile(dem, obs, 270, 150000);
   return {
     h0, sight, hit,
-    miss: hit.lat ? geo.distance(hit.lat, hit.lon, etna.lat, etna.lon) : null,
-    sky: await geo.castRay(dem, obs, sight.az, 20, 150000),
-    sea: await geo.castRay(dem, obs, 270, -2, 150000),
+    miss: geo.distance(hit.lat, hit.lon, etna.lat, etna.lon),
+    sky: geo.pickTarget(profile, 20).kind,
+    sea: geo.pickTarget(west, -4).kind,
+    westSegments: west.segments.map((s) => [Math.round(s[0].dist), Math.round(s[s.length - 1].dist), +s[0].el.toFixed(2), +s[s.length - 1].el.toFixed(2)]),
+    // Inclinazione letta 0,7° troppo bassa: deve comunque scegliere la Sicilia, non la riva o il mare.
+    across: geo.pickTarget(west, -0.7),
     center: geo.rayFromMatrix(m),
     right: geo.rayFromMatrix(m, Math.tan(Math.PI / 18), 0),
     up: geo.rayFromMatrix(m, 0, Math.tan(Math.PI / 36)),
@@ -80,10 +86,11 @@ const near = (a, b, tol, msg) => assert.ok(Math.abs(a - b) <= tol, `${msg}: ${a}
 assert.ok(r.h0 < 30, 'osservatore vicino al livello del mare');
 assert.ok(r.sight.visible, 'Etna visibile da Reggio');
 assert.ok(r.sight.elev > 3000, 'quota della cima');
-assert.equal(r.hit.type, 'terrain');
 assert.ok(r.miss < 6000, `il raggio colpisce il fianco dell'Etna (scarto ${r.miss} m)`);
-assert.equal(r.sky.type, 'sky');
-assert.equal(r.sea.type, 'sea');
+assert.equal(r.sky, 'sky');
+assert.equal(r.sea, 'sea');
+assert.equal(r.across.kind, 'land');
+assert.ok(r.across.point.dist > 5000, 'oltre lo Stretto, non la riva vicina');
 near(r.center.az, 120, 0.01, 'azimut centro'); near(r.center.el, 10, 0.01, 'elevazione centro');
 near(r.right.az, 130.1, 0.3, 'tocco a destra'); near(r.up.el, 15, 0.01, 'tocco in alto');
 near(r.landscape.az, 90, 0.01, 'orizzontale: azimut'); near(r.landscape.el, 5, 0.01, 'orizzontale: tocco in alto');
@@ -100,6 +107,7 @@ assert.equal(title, 'Paese di Prova');
 assert.match(facts, /6\d km/);
 await page.screenshot({ path: join(cache, 'risultato.png') });
 
+assert.match(await page.textContent('#sheet .tech'), /Direzione 23\d/);
 await page.click('#sheet-close');
 await page.mouse.click(195, 100); // molto sopra il crinale
 await page.waitForSelector('#sheet:not([hidden]) h2');
