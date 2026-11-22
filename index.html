@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+  <meta name="theme-color" content="#0f1720">
+  <title>Localizza</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <main id="view">
+    <video id="video" playsinline muted></video>
+    <div id="crosshair" aria-hidden="true"></div>
+    <div id="marker" hidden aria-hidden="true"></div>
+
+    <header id="hud">
+      <span class="pill" id="hud-dir">—</span>
+      <span class="pill" id="hud-gps">GPS…</span>
+      <span class="spacer"></span>
+      <button class="icon" id="btn-sun" title="Calibra con il sole" aria-label="Calibra con il sole">☀</button>
+      <button class="icon" id="btn-settings" title="Impostazioni" aria-label="Impostazioni">⚙</button>
+    </header>
+
+    <div id="zoom-bar" hidden>
+      <input type="range" id="zoom" aria-label="Zoom">
+      <span id="zoom-label">1×</span>
+    </div>
+
+    <p id="hint">Tocca il punto che vuoi riconoscere</p>
+  </main>
+
+  <section id="start" class="overlay">
+    <div class="card">
+      <h1>Localizza</h1>
+      <p>Inquadra il paesaggio, tocca un punto e scopri che posto è.</p>
+      <p class="small">Servono fotocamera, posizione e bussola. Prima di iniziare muovi il telefono
+        disegnando un «8» in aria: aiuta la bussola a tararsi.</p>
+      <button id="btn-start" class="primary">Avvia</button>
+      <p id="start-error" class="error" hidden></p>
+    </div>
+  </section>
+
+  <section id="sheet" class="sheet" hidden>
+    <button class="close" id="sheet-close" aria-label="Chiudi">✕</button>
+    <div id="sheet-body"></div>
+    <div id="map"></div>
+  </section>
+
+  <section id="settings" class="overlay" hidden>
+    <div class="card">
+      <h2>Impostazioni</h2>
+      <label>Campo visivo della fotocamera: <output id="fov-out"></output>
+        <input type="range" id="fov" min="40" max="100" step="1">
+      </label>
+      <label>Correzione bussola: <output id="head-out"></output>
+        <input type="range" id="head" min="-30" max="30" step="0.5">
+      </label>
+      <label>Correzione inclinazione: <output id="pitch-out"></output>
+        <input type="range" id="pitch" min="-10" max="10" step="0.1">
+      </label>
+      <label>Distanza massima: <output id="dist-out"></output>
+        <input type="range" id="dist" min="20" max="250" step="10">
+      </label>
+      <p class="small">Per la precisione conta soprattutto la bussola: usa ☀ per tararla puntando il sole.</p>
+      <div class="row">
+        <button id="settings-reset">Azzera</button>
+        <button id="settings-close" class="primary">Fatto</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="sun" class="overlay clear" hidden>
+    <div class="card bottom">
+      <h2>Calibra con il sole</h2>
+      <p>Porta il sole al centro del mirino, poi conferma. Non fissarlo a occhio nudo: guardalo solo sullo schermo.</p>
+      <p id="sun-info" class="small"></p>
+      <div class="row">
+        <button id="sun-cancel">Annulla</button>
+        <button id="sun-ok" class="primary">Conferma</button>
+      </div>
+    </div>
+  </section>
+
+  <script src="vendor/leaflet/leaflet.js"></script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
